@@ -1,0 +1,176 @@
+*
+* Replication file for Dueker(1997),  "Markov Switching in GARCH
+* Processes and Mean-Reverting Stock-Market Volatility," J of
+* Business & Economic Statistics, vol. 15, no 1, 26-34.
+*
+* SWARCH(2) model with switching normalization factors and means
+* with conditionally t distributed errors.
+*
+open data spret_dueker.xls
+data(format=xls,org=columns) 1 2529 spret
+*
+* Copy the data over to y to make it easier to change the program.
+*
+set y = 100.0*spret
+*
+* This is the number of ARCH lags.
+*
+compute q=2
+*
+@MSSetup(states=2,lags=q)
+*
+* GV will be the relative variances in the regimes.
+*
+dec vect gv(nstates)
+*
+* This will be the vector of ARCH parameters. The constant in the
+* ARCH equation is fixed at 1 as the normalization.
+*
+dec vect msg(q)
+dec real nu
+*
+* We have three parts of the parameter set: the mean equation
+* parameters (separate mu's for each regime), the GARCH model
+* parameters, and the Markov switching parameters.
+*
+dec vector mu(nstates)
+nonlin(parmset=meanparms) mu
+nonlin(parmset=archparms) msg gv nu
+nonlin(parmset=msparms)   p
+*
+* uu and u are used for the series of squared residuals and the
+* series of residuals needed to compute the ARCH variances.
+*
+clear uu u
+*
+* These for the lagged residuals and lagged squared residuals,
+* which are regime-dependent because of the regime-dependent means.
+*
+dec vect[series] uus(nstates) us(nstates)
+************************************************************************
+*
+* ARCHRegimeH returns the VECTOR of the H values across augmented
+* regime settings.
+*
+function ARCHRegimeH time
+type vector 	ARCHRegimeH
+type integer 	time
+*
+local integer i k
+*
+dim ARCHRegimeH(nexpand)
+do i=1,nexpand
+   compute h=1.0
+   do k=1,q
+      compute h=h+msg(k)*uus(%MSLagRegime(i,k))(time-k)/gv(%MSLagRegime(i,k))
+   end do k
+   compute ARCHRegimeH(i)=h
+end do i
+end
+************************************************************************
+*
+* ARCHRegimeVGaussF returns a vector of likelihoods for the expanded
+* regimes at <<time>> given regime "h" factors <<hv> and regime
+* residuals <<ev>> using conditionally Gaussian errors.
+*
+function ARCHRegimeVGaussF time hv ev
+type vector  	ARCHRegimeVGaussF
+type integer 	time
+type vector		hv ev
+*
+local integer 	i k
+local real 		h
+*
+dim ARCHRegimeVGaussF(nexpand)
+do i=1,nexpand
+   compute k=%MSLagRegime(i,0)
+   compute ARCHRegimeVGaussF(i)=%if(hv(i)>0,exp(%logdensity(hv(i)*gv(k),ev(k))),0.0)
+end do i
+end
+************************************************************************
+*
+* ARCHRegimeVTF returns a vector of likelihoods for the expanded
+* regimes at <<time>> given regime "h" factors <<hv> and regime
+* residuals <<ev>> using conditionally student-t errors.
+*
+function ARCHRegimeVTF time hv ev
+type vector  	ARCHRegimeVTF
+type integer 	time
+type vector		hv ev
+*
+local integer 	i k
+local real 		h
+*
+dim ARCHRegimeVTF(nexpand)
+do i=1,nexpand
+   compute k=%MSLagRegime(i,0)
+   compute ARCHRegimeVTF(i)=%if(hv(i)>0,exp(%logtdensity(hv(i)*gv(k),ev(k),nu)),0.0)
+end do i
+end
+*********************************************************************
+function ARCHRegimeResids time
+type vector 	ARCHRegimeResids
+type integer	time
+*
+* Compute the residuals for each current regime
+*
+local integer i
+*
+dim ARCHRegimeResids(nstates)
+do i=1,nstates
+   compute ARCHRegimeResids(i)=y(time)-mu(i)
+end do i
+end
+*********************************************************************
+linreg y
+# constant
+set uu = %seesq
+set u  = %resids
+do i=1,nstates
+   set uus(i) = %sigmasq
+   set us(i)  = %resids
+end do i
+*
+* Run a GARCH model for guess values. Use the same range that will be
+* used for the MS process.
+*
+garch(q=2,distrib=t) 3 * y
+compute gstart=%regstart(),gend=%regend()
+*
+* This uses %NREGMEAN so it can be easily modified for different mean
+* models.
+*
+compute mu(1)=%beta(1)
+compute mu(2)=%beta(1)
+*
+compute msg=%xsubvec(%beta,%nregmean+2,%nregmean+3)
+compute nu=%beta(%nregmean+4)
+*
+* Start with guess values for GV that scale the original constant down
+* and up.
+*
+compute gv(1)=%beta(%nregmean+1)/2.0
+compute gv(2)=%beta(%nregmean+1)*2.0
+*
+* These are our guess values for the P matrix.
+*
+compute p=||.80,.20||
+*
+gset pt_t  gstart gend = %zeros(nexpand,1)
+gset pt_t1 gstart gend = %zeros(nexpand,1)
+*
+frml logl = hvec=ARCHRegimeH(t),evec=ARCHRegimeResids(t),f=ARCHRegimeVTF(t,hvec,evec),$
+   %pt(us,t,evec),%pt(uus,t,evec.^2),fpt=%MSProb(t,f),log(fpt)
+*
+maximize(parmset=meanparms+archparms+msparms,$
+  start=%(pstar=%MSInit()),$
+  method=bfgs,iters=400,pmethod=simplex,piters=5) logl gstart gend
+*
+@MSSmoothed gstart gend psmooth
+set p1 = psmooth(t)(1)
+set p2 = psmooth(t)(2)
+graph(max=1.0,footer="Probabilities of Regimes in Two Lag Two-Regime student t SWARCH",$
+  style=stacked) 2
+# p1
+# p2
+

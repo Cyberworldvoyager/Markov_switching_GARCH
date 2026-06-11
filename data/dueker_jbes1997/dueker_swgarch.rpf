@@ -1,0 +1,230 @@
+*
+* Replication file for Dueker(1997),  "Markov Switching in GARCH
+* Processes and Mean-Reverting Stock-Market Volatility," J of Business &
+* Economic Statistics, vol. 15, no 1, 26-34.
+*
+* GARCH model with switching intercepts only, student t conditional
+* density. ("GARCH" column in the paper). This is done by using the
+* switching GARCH setup but constraining the two variance switch
+* parameters to be equal in the parameter set.
+*
+* Note that the results in the table are clearly wrong---there is
+* effectively no difference between the reported regimes, so the
+* likelihood should be similar to that of the straight non-switching
+* GARCH model (-3312).
+*
+* There are two possible recursions for the variance. The
+* Hamilton-Susmel recursion does the GARCH recursion in standardized
+* form and then multiplies up by a regime-specific variance factor. The
+* Cai recursion does a more typical GARCH recursion and switches the
+* intercept in the variance equation. If HSRECURSION=1, the
+* Hamilton-Susmel model is used; if it's zero, the Cai recursion is used.
+*
+compute hsrecursion=0
+*
+open data spret_dueker.xls
+data(format=xls,org=columns) 1 2529 spret
+*
+* Copy the data over to y to make it easier to change the program. Data
+* are log differences, so they are scaled by 100 to improve the scale.
+*
+set y = 100.0*spret
+*
+* This sets the number of regimes. The analysis requires one lagged
+* regime.
+*
+@MSSetup(regimes=2,lags=1)
+*
+* GV will be the relative variances in the regimes (HS recursion) or the
+* variance intercepts (Cai recursion).
+*
+dec vect gv(nregimes)
+*
+* This will be the vector of GARCH parameters. In the HS recursion, the
+* constant in the GARCH equation is fixed at 1, while it is the
+* regime-specific value of GV in the Cai recursion.
+*
+dec vect msg(2)
+dec real nu
+*
+* We have three parts of the parameter set: the mean equation parameters
+* (separate mu's for each regime),  the GARCH model parameters, and the
+* Markov switching parameters.
+*
+dec vect mu(nregimes)
+nonlin(parmset=meanparms)  mu
+nonlin(parmset=garchparms) msg gv nu
+nonlin(parmset=msparms)    p
+*
+* uu and u are used for the series of squared residuals and the series of
+* residuals needed to compute the GARCH variances.
+*
+clear uu u h
+*
+* These are used for the lagged variance for each regime.
+*
+compute DFFilterSize=nregimes^nlags
+dec vect[series] hs(DFFilterSize)
+*
+* And these for the lagged squared residuals
+*
+dec vect[series] uus(nregimes)
+************************************************************************
+function GARCHRegimeResids time
+type vector 	GARCHRegimeResids
+type integer	time
+*
+* Compute the residuals for each current regime
+*
+local integer i
+*
+dim GARCHRegimeResids(nregimes)
+do i=1,nregimes
+   compute GARCHRegimeResids(i)=y(time)-mu(i)
+end do i
+end
+************************************************************************
+*
+* GARCHRegimeHS returns the VECTOR of the H values across augmented
+* regime settings for the Hamilton-Susmel recursion.
+*
+function GARCHRegimeHS time
+type vector GARCHRegimeHS
+type integer time
+*
+local integer i
+*
+dim GARCHRegimeHS(nexpand)
+do i=1,nexpand
+   compute GARCHRegimeHS(i)=$
+      (1.0+msg(2)*hs(%MSLagRegime(i,1))(time-1)+$
+           msg(1)*uus(%MSLagRegime(i,1))(time-1)/gv(%MSLagRegime(i,1)))
+end do i
+end
+**************************************************************************
+*
+* GARCHRegimeCai returns the VECTOR of the H values across augmented
+* regime settings for the Cai recursion.
+*
+function GARCHRegimeCai time
+type vector GARCHRegimeCai
+type integer time
+*
+local integer i
+*
+dim GARCHRegimeCai(nexpand)
+do i=1,nexpand
+   compute GARCHRegimeCai(i)=gv(%MSLagRegime(i,0))+$
+       msg(2)*hs(%MSLagRegime(i,1))(time-1)+$
+       msg(1)*uus(%MSLagRegime(i,1))(time-1)
+end do i
+end
+**************************************************************************
+*
+* Do a GARCH model to get initial guess values
+*
+linreg y
+# constant
+set u  = %resids
+set uu = %sigmasq
+do i=1,nregimes
+   set uus(i) = %sigmasq
+end do i
+*
+* We'll start this at entry 3 (Jan 6, 1982) to match the MS model
+*
+garch(p=1,q=1,distrib=t) 3 * y
+compute gstart=%regstart(),gend=%regend()
+*
+* This is written to be easily modified for different mean models
+*
+* Spread the mu's apart since they're the only thing switching in this
+* model.
+*
+compute mu(1)=%beta(1)-%stderrs(1)
+compute mu(2)=%beta(1)+%stderrs(1)
+*
+* In this model, these are the same (and will be pegged to stay that
+* way).
+*
+compute gv(1)=%beta(%nregmean+1)
+compute gv(2)=%beta(%nregmean+1)
+*
+compute msg=%xsubvec(%beta,%nregmean+2,%nregmean+3)
+compute nu=%beta(%nregmean+4)
+*
+* The "H" series used in the Hamilton-Susmel formulation need scaling by
+* the normalization factor to become variances. So we scale the
+* pre-sample values down to match.
+*
+set h = %if(hsrecursion,%sigmasq/%beta(%nregmean+1),%sigmasq)
+do i=1,nregimes
+   set hs(i) = h
+end do i
+*
+compute p=||.9,.1||
+**************************************************************************
+*
+* This does a single step of the Dueker (approximate) filter
+*
+function DuekerFilter time
+type integer 		time
+*
+local real       	e
+local vector      fvec evec hvec ph
+*
+dim fvec(nexpand) evec(nregimes)
+*
+* Compute the "H" matrices for each expanded regime
+*
+compute hvec=%if(hsrecursion,GARCHRegimeHS(time),GARCHRegimeCai(time))
+*
+* Compute the residuals for each current regime
+*
+compute evec=GARCHRegimeResids(time)
+*
+* Compute the likelihood for each expanded regime.
+*
+do i=1,nexpand
+   compute e=evec(%MSLagRegime(i,0))
+   if hsrecursion
+      compute fvec(i)=%if(hvec(i)>0,exp(%logtdensity(hvec(i)*gv(%MSLagRegime(i,0)),e,nu)),0.0)
+   else
+      compute fvec(i)=%if(hvec(i)>0,exp(%logtdensity(hvec(i),e,nu)),0.0)
+end do i
+*
+* Do a filter step to update the probabilities. The log likelihood
+* element is returned in the LOGF option.
+*
+@MSFilterStep(logf=DuekerFilter) time fvec
+*
+* Take probability weighted averages of the h's for each regime.
+*
+compute ph=pt_t(time).*hvec
+compute pdiv  =%sumc(%reshape(pt_t(time),nregimes,DFFilterSize))
+compute phstar=%sumc(%reshape(ph,nregimes,DFFilterSize))./pdiv
+*
+* Push them out into the HS vector
+*
+compute %pt(hs,t,phstar)
+compute %pt(uus,t,evec.^2)
+end
+**************************************************************************
+function DFStart
+@MSFilterInit
+end
+**************************************************************************
+frml LogDFFilter = DuekerFilter(t)
+*
+@MSFilterSetup(noem)
+nonlin(parmset=fixgv) gv(2)=gv(1)
+*
+maximize(start=DFStart(),parmset=meanparms+garchparms+msparms+fixgv,$
+  pmethod=simplex,piters=5,method=bfgs) logDFFilter gstart gend
+@MSSmoothed gstart gend psmooth
+set p1 = psmooth(t)(1)
+set p2 = psmooth(t)(2)
+graph(max=1.0,footer="Probabilities of Regimes",$
+  style=stacked) 2
+# p1
+# p2
